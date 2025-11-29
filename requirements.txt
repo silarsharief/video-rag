@@ -1,0 +1,58 @@
+# Forensic Video RAG System - Python Dependencies
+# Python 3.9+ required
+
+# ==================== Core Framework ====================
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# ==================== Vision Processing (Edge) ====================
+# YOLO11 for object detection
+ultralytics==8.1.0
+
+# BoT-SORT for object tracking
+# Note: May need to install from source or use alternative
+# bot-sort==0.1.0  # Check availability
+
+# InsightFace for face recognition
+insightface==0.7.3
+onnxruntime==1.16.3  # Required by InsightFace
+
+# Computer Vision utilities
+opencv-python==4.8.1.78
+numpy==1.24.3
+Pillow==10.1.0
+
+# ==================== Cloud APIs ====================
+# Google Gemini API
+google-generativeai==0.3.1
+
+# ==================== Database ====================
+# Neo4j Graph Database
+neo4j==5.14.1
+
+# ChromaDB Vector Database
+chromadb==0.4.18
+
+# Embedding model for ChromaDB
+sentence-transformers==2.2.2
+
+# ==================== Frontend ====================
+streamlit==1.28.1
+
+# ==================== Utilities ====================
+# HTTP requests
+httpx==0.25.1
+
+# Logging and monitoring
+loguru==0.7.2
+
+# Type checking (development)
+mypy==1.7.1
+
+# Code formatting (development)
+black==23.11.0
+flake8==6.1.0
+

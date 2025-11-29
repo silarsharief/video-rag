@@ -1,0 +1,17 @@
+# Core Vision & AI
+ultralytics==8.3.0
+insightface==0.7.3
+onnxruntime-silicon>=1.16.0
+opencv-python-headless
+numpy<2.0.0
+Pillow
+
+# Cloud & Database
+google-generativeai
+neo4j>=5.0.0
+chromadb>=0.5.0
+
+# App & Utilities
+streamlit
+python-dotenv
+tqdm
