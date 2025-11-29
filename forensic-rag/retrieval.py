@@ -14,7 +14,7 @@ class ForensicSearch:
         # Step 1: Vector Search (The "What")
         results = self.db.vector_col.query(
             query_texts=[user_query],
-            n_results=3
+            n_results=5
         )
         
         context_data = []
@@ -25,11 +25,13 @@ class ForensicSearch:
         with self.db.driver.session() as session:
             for i, sid in enumerate(scene_ids):
                 # Query: Find connected persons and adjacent scenes
+# UPDATED CYPHER QUERY (Fixes "NoneType" and "Multiple Records" error)
                 cypher = """
                 MATCH (s:Scene {id: $sid})
                 OPTIONAL MATCH (p:Person)-[:APPEARS_IN]->(s)
+                WITH s, collect(p.id) as person_list
                 OPTIONAL MATCH (prev)-[:NEXT]->(s)-[:NEXT]->(next)
-                RETURN p.id as persons, prev.summary as prev_summary, next.summary as next_summary
+                RETURN person_list as persons, prev.summary as prev_summary, next.summary as next_summary
                 """
                 graph_data = session.run(cypher, sid=sid).single()
                 

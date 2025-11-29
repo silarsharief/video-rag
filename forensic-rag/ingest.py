@@ -137,10 +137,17 @@ class VideoIngestor:
             "event_type": "Traffic/Routine/Loitering"
         }
         """
-        
         try:
             response = model.generate_content(frames + [prompt], safety_settings=safety_settings)
-            analysis = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+            
+            # 1. robust cleaning
+            raw_text = response.text.strip()
+            # Remove markdown code blocks if present
+            if "```" in raw_text:
+                raw_text = raw_text.split("```json")[-1].split("```")[0].strip()
+            
+            # 2. Parse
+            analysis = json.loads(raw_text)
             
             scene_id = str(uuid.uuid4())
             self.db.add_scene_node(
@@ -148,13 +155,16 @@ class VideoIngestor:
                 scene_id, 
                 start, 
                 end, 
-                analysis['summary'], 
+                analysis.get('summary', 'No summary provided'), 
                 list(person_ids)
             )
-            logger.info(f"Saved Scene {scene_id}: {analysis['summary'][:50]}...")
+            logger.info(f"Saved Scene {scene_id}: {analysis.get('summary', '')[:50]}...")
             
         except Exception as e:
+            # Print the RAW text so we can see why it failed
             logger.error(f"Gemini Error: {e}")
+            if 'response' in locals() and response.text:
+                logger.error(f"Raw Gemini Output was: {response.text[:100]}...")
 
 if __name__ == "__main__":
     # Test run

@@ -37,14 +37,32 @@ if query and os.path.exists("chromadb"):
     # Display Results
     st.markdown(f"### 🤖 Analysis:\n{answer}")
     
-    st.divider()
-    st.subheader("Visual Evidence")
+    # ... inside app.py ...
     
-    cols = st.columns(3)
+    st.divider()
+    st.subheader(f"Visual Evidence ({len(evidence)} Matches Found)")
+    
+    cols = st.columns(2) # 2 columns looks better than 3 for video
     for idx, ev in enumerate(evidence):
-        with cols[idx]:
-            st.info(f"Timestamp: {ev['time']}")
-            # Parse start time for video seek
-            start_sec = float(ev['time'].split('s')[0])
+        with cols[idx % 2]:
+            # 1. Parse the Timestamps (e.g., "10.4s - 22.4s")
+            try:
+                time_range = ev['time'].replace('s', '').split(' - ')
+                start_sec = float(time_range[0])
+                end_sec = float(time_range[1])
+            except:
+                start_sec = 0
+                end_sec = 0
+            
+            # 2. Display the Timestamp Label
+            st.markdown(f"**Event {idx+1}:** `{ev['time']}`")
+            
+            # 3. The "Clip" Trick
+            # We open the local file, read the bytes, but display it with start_time
+            # Note: Streamlit doesn't support 'end_time' strictly, but this sets the start.
             st.video("temp_video.mp4", start_time=int(start_sec))
-            st.caption(ev['description'])
+            
+            # 4. Detailed Description
+            with st.expander("Read Scene Details"):
+                st.caption(ev['description'])
+                st.markdown(f"**People Detected:** {len(ev.get('persons_present', []))}")
