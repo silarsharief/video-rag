@@ -47,94 +47,108 @@ class VideoIngestor:
         self.face_app.prepare(ctx_id=0, det_size=(640, 640))
 
     def process_video(self):
-        cap = cv2.VideoCapture(self.video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        
-        buffer_frames = []
-        buffer_person_ids = set()
-        last_capture_time = -10
-        scene_start_time = 0
-        
-        frame_idx = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret: break
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
             
-            current_time = frame_idx / fps
+            buffer_frames = []
+            buffer_person_ids = set()
+            last_capture_time = -10
+            scene_start_time = 0
             
-            # 1. Event Trigger Logic (Run every 5th frame for speed)
-            if frame_idx % 5 == 0:
-                results = self.yolo(frame, verbose=False, device='mps')
-                detections = results[0].boxes.cls.cpu().numpy() # Classes
+            frame_idx = 0
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: break
                 
-                # Check for Persons (0), Cars (2), Backpacks (24), Knives (43)
-                relevant_classes = {0, 2, 24, 43} 
-                is_event = any(cls in relevant_classes for cls in detections)
+                current_time = frame_idx / fps
                 
-                should_capture = False
-                trigger_type = "None"
-                
-                # Rule A: Evidence (Event + 1s cooldown)
-                if is_event and (current_time - last_capture_time > 1.0):
-                    should_capture = True
-                    trigger_type = "Event"
-                
-                # Rule B: Heartbeat (Empty scene + 10s cooldown)
-                elif (current_time - last_capture_time > 10.0):
-                    should_capture = True
-                    trigger_type = "Heartbeat"
-                
-                if should_capture:
-                    last_capture_time = current_time
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(rgb_frame)
-                    buffer_frames.append(pil_img)
+                # 1. Event Trigger Logic (Run every 5th frame for speed)
+                if frame_idx % 5 == 0:
+                    results = self.yolo(frame, verbose=False, device='mps')
+                    detections = results[0].boxes.cls.cpu().numpy() # Classes
                     
-                    # Run Face ID if person detected
-                    if 0 in detections:
-                        faces = self.face_app.get(frame)
-                        for face in faces:
-                            # Simple hash of embedding for ID (In prod, use vector search)
-                            # Taking first 8 chars of hash for readability
-                            fid = f"PID_{abs(hash(face.embedding.tobytes())) % 100000}"
-                            buffer_person_ids.add(fid)
+                    # === TRAFFIC FOCUSED CLASSES (COCO Dataset IDs) ===
+                    # 0: Person (Pedestrians)
+                    # 1: Bicycle
+                    # 2: Car
+                    # 3: Motorcycle
+                    # 5: Bus
+                    # 7: Truck
+                    # 9: Traffic Light
+                    relevant_classes = {0, 1, 2, 3, 5, 7, 9} 
                     
-                    logger.info(f"Captured {trigger_type} at {current_time:.2f}s")
+                    is_event = any(cls in relevant_classes for cls in detections)
+                    
+                    should_capture = False
+                    trigger_type = "None"
+                    
+                    # Rule A: Evidence (Event + 1s cooldown)
+                    if is_event and (current_time - last_capture_time > 1.0):
+                        should_capture = True
+                        trigger_type = "Traffic Event"
+                    
+                    # Rule B: Heartbeat (Empty scene + 10s cooldown)
+                    elif (current_time - last_capture_time > 10.0):
+                        should_capture = True
+                        trigger_type = "Heartbeat"
+                    
+                    if should_capture:
+                        last_capture_time = current_time
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        pil_img = Image.fromarray(rgb_frame)
+                        buffer_frames.append(pil_img)
+                        
+                        # Run Face ID if person detected (Pedestrians)
+                        if 0 in detections:
+                            faces = self.face_app.get(frame)
+                            for face in faces:
+                                # Simple hash of embedding for ID
+                                fid = f"PID_{abs(hash(face.embedding.tobytes())) % 100000}"
+                                buffer_person_ids.add(fid)
+                        
+                        logger.info(f"Captured {trigger_type} at {current_time:.2f}s")
 
-            # 2. Batch Processing (Gemini) - Every 60 seconds of video or 15 frames
-            if len(buffer_frames) >= 10 or (current_time - scene_start_time > 60 and buffer_frames):
-                self._flush_buffer(buffer_frames, buffer_person_ids, scene_start_time, current_time)
-                # Reset Buffer
-                buffer_frames = []
-                buffer_person_ids = set()
-                scene_start_time = current_time
+                # 2. Batch Processing (Gemini) - Every 60 seconds OR 5 frames (Updated for precision)
+                if len(buffer_frames) >= 5 or (current_time - scene_start_time > 60 and buffer_frames):
+                    self._flush_buffer(buffer_frames, buffer_person_ids, scene_start_time, current_time)
+                    # Reset Buffer
+                    buffer_frames = []
+                    buffer_person_ids = set()
+                    scene_start_time = current_time
+                    
+                frame_idx += 1
                 
-            frame_idx += 1
-        # === FIX: FORCE FLUSH THE FINAL BUFFER ===
-        if buffer_frames:
-            logger.info("Flushing final batch...")
-            self._flush_buffer(buffer_frames, buffer_person_ids, scene_start_time, frame_idx / fps)
-        # =========================================    
-        cap.release()
-        self.db.close()
-        logger.info("Ingestion Complete.")
+            # === FIX: FORCE FLUSH THE FINAL BUFFER ===
+            if buffer_frames:
+                logger.info("Flushing final batch...")
+                self._flush_buffer(buffer_frames, buffer_person_ids, scene_start_time, frame_idx / fps)
+                
+            cap.release()
+            self.db.close()
+            logger.info("Ingestion Complete.")
 
     def _flush_buffer(self, frames, person_ids, start, end):
         logger.info(f"Analyzing Scene {start:.1f}s - {end:.1f}s with Gemini...")
         
+        # UPDATED PROMPT: TRAFFIC FORENSICS (Color, Type, Direction)
         prompt = """
-        # NEUTRAL PROMPT (No more "Forensic" bias)
-        You are a video analyst. Analyze these CCTV keyframes.
-        1. Describe the scene activity (traffic flow, pedestrian movement, weather).
-        2. List all visible objects (cars, trucks, people, bicycles).
-        3. Note any specific events (car parking, person entering building).
+        You are a Traffic Forensic Analyst. Analyze these CCTV frames.
         
-        Output pure JSON:
+        Task 1: For every vehicle, identify:
+        - Type: (Sedan, SUV, Van, Truck, Bus, Motorbike)
+        - Color: (Be specific: "Red", "Dark Blue", "Silver", "White")
+        - Action/Direction: (e.g., "Turning Left", "Stopped at Light", "Speeding")
+        
+        Task 2: Count the total unique vehicles.
+        
+        Output pure JSON format:
         {
-            "summary": "Detailed, neutral description of the scene...",
-            "activity_level": "Low/Medium/High",
-            "objects_detected": ["white_van", "pedestrians", "trees"],
-            "event_type": "Traffic/Routine/Loitering"
+            "summary": "A red sedan turned left while a white van waited at the light.",
+            "traffic_log": [
+                {"type": "Car", "color": "Red", "action": "Turning Left"},
+                {"type": "Van", "color": "White", "action": "Stationary"}
+            ],
+            "vehicle_counts": {"Car": 1, "Van": 1}
         }
         """
         try:
