@@ -1,6 +1,7 @@
 # Forensic Video RAG System
 
 A production-ready, edge-first forensic video analysis system that processes CCTV footage and enables natural language queries for security investigations. The system combines computer vision, face recognition, vector search, and graph databases to provide intelligent video analysis capabilities.
+<img width="1667" height="1042" alt="Screenshot 2026-01-02 at 5 55 59 PM" src="https://github.com/user-attachments/assets/d3dc9592-7b70-4a32-b1e9-bffd97b10759" />
 
 ## 🎯 Overview
 
