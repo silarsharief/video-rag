@@ -1,21 +1,22 @@
 import os
 import certifi
-import ssl
-
-# Global SSL Fix for Mac
-os.environ['SSL_CERT_FILE'] = certifi.where()
-
 import chromadb
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
+# Global SSL Fix for Mac
+os.environ['SSL_CERT_FILE'] = certifi.where()
 load_dotenv()
 
 class ForensicDB:
     def __init__(self):
         # 1. Initialize Vector DB
         self.chroma_client = chromadb.PersistentClient(path="./chromadb")
-        self.vector_col = self.chroma_client.get_or_create_collection(name="forensic_scenes")
+        # Ensure cosine similarity is used for better text matching
+        self.vector_col = self.chroma_client.get_or_create_collection(
+            name="forensic_scenes",
+            metadata={"hnsw:space": "cosine"} 
+        )
 
         # 2. Load Env Variables
         uri = os.getenv("NEO4J_URI")
@@ -34,25 +35,26 @@ class ForensicDB:
     def close(self):
         self.driver.close()
 
-    # === UPDATED: Added 'mode' argument ===
     def add_scene_node(self, video_name, mode, scene_id, start_time, end_time, summary, person_ids, object_tags):
         """
         Atomic transaction to update Graph (Timeline) and Vector (Search)
         """
-        # A. Vector Store: Save 'mode' in metadata for filtering
+        # A. Vector Store
         self.vector_col.add(
             documents=[summary],
             metadatas=[{
-                "video": video_name, 
-                "mode": mode,  # <--- NEW: Allows filtering by Use Case
-                "start": start_time, 
-                "end": end_time, 
-                "scene_id": scene_id
+                "video_name": video_name, 
+                "mode": mode,
+                "start_time": start_time, 
+                "end_time": end_time, 
+                "scene_id": scene_id,
+                "person_count": len(person_ids),
+                "objects": ", ".join(object_tags) if object_tags else "none"
             }],
             ids=[scene_id]
         )
 
-        # B. Graph Store: Pass 'mode' to Cypher
+        # B. Graph Store
         with self.driver.session() as session:
             session.execute_write(
                 self._create_graph_nodes, 
@@ -61,7 +63,7 @@ class ForensicDB:
 
     @staticmethod
     def _create_graph_nodes(tx, video_name, mode, scene_id, start, end, summary, person_ids, object_tags):
-        # 1. Create Video Node with a 'type' property
+        # 1. Create Video Node
         tx.run("MERGE (v:Video {name: $name}) SET v.type = $mode", name=video_name, mode=mode)
         
         # 2. Create Scene Node
@@ -72,12 +74,12 @@ class ForensicDB:
             s.end = $end, 
             s.summary = $summary,
             s.objects = $objects,
-            s.mode = $mode      // <--- NEW: Store mode on Scene too
+            s.mode = $mode
         MERGE (v)-[:HAS_SEGMENT]->(s)
         """
         tx.run(query_scene, video_name=video_name, mode=mode, id=scene_id, start=start, end=end, summary=summary, objects=object_tags)
 
-        # 3. Create Timeline Link
+        # 3. Create Timeline Link (The "Next" Arrow)
         query_timeline = """
         MATCH (s:Scene {id: $id})
         MATCH (prev:Scene) WHERE prev.end <= $start AND prev.id <> $id
