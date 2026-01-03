@@ -2,57 +2,47 @@
 # Python 3.9+ required
 
 # ==================== Core Framework ====================
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
 python-dotenv==1.0.0
+certifi  # SSL certificates for Mac
 
 # ==================== Vision Processing (Edge) ====================
-# YOLO11 for object detection
-ultralytics==8.1.0
-
-# BoT-SORT for object tracking
-# Note: May need to install from source or use alternative
-# bot-sort==0.1.0  # Check availability
+# YOLO for object detection
+ultralytics==8.3.0
 
 # InsightFace for face recognition
 insightface==0.7.3
-onnxruntime==1.16.3  # Required by InsightFace
+onnxruntime-silicon>=1.16.0  # For Apple Silicon / Mac
+# Use onnxruntime==1.16.3 for non-Mac systems
 
 # Computer Vision utilities
-opencv-python==4.8.1.78
-numpy==1.24.3
-Pillow==10.1.0
+opencv-python-headless  # Headless for server deployments
+numpy<2.0.0  # Compatibility with current packages
+Pillow
 
 # ==================== Cloud APIs ====================
 # Google Gemini API
-google-generativeai==0.3.1
+google-generativeai
 
 # ==================== Database ====================
 # Neo4j Graph Database
-neo4j==5.14.1
+neo4j>=5.0.0
 
 # ChromaDB Vector Database
-chromadb==0.4.18
-
-# Embedding model for ChromaDB
-sentence-transformers==2.2.2
+chromadb>=0.5.0
 
 # ==================== Frontend ====================
-streamlit==1.28.1
+streamlit
+tqdm  # Progress bars
 
-# ==================== Utilities ====================
-# HTTP requests
-httpx==0.25.1
+# ==================== Optional: FastAPI Backend ====================
+# Uncomment if building REST API instead of Streamlit
+# fastapi==0.104.1
+# uvicorn[standard]==0.24.0
+# pydantic==2.5.0
+# pydantic-settings==2.1.0
 
-# Logging and monitoring
-loguru==0.7.2
-
-# Type checking (development)
-mypy==1.7.1
-
-# Code formatting (development)
-black==23.11.0
-flake8==6.1.0
-
+# ==================== Development Tools (Optional) ====================
+# Uncomment for development
+# mypy==1.7.1
+# black==23.11.0
+# flake8==6.1.0

@@ -4,47 +4,48 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.egg-info/
+dist/
+build/
 
 # Virtual Environment
 venv/
 env/
 ENV/
-.venv
-
-# Database files
-chromadb/
-*.sqlite3
-*.db
-
-# Temporary files
-temp_video.mp4
-*.tmp
-*.log
-
-# Model files (large binary files)
-*.pt
-*.pth
-*.onnx
-*.pkl
-
-# Environment variables
-.env
-.env.local
-.env.*.local
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
-
-# OS
 .DS_Store
-Thumbs.db
 
-# Data directories (if contains large files)
-data/*.mp4
-data/*.avi
-data/*.mov
+# Environment Variables
+.env
+.env.local
 
+# Data Directories
+data/videos/*
+!data/videos/.gitkeep
+data/chromadb/*
+!data/chromadb/.gitkeep
+data/temp/*
+!data/temp/.gitkeep
+
+# Model Files (large files)
+models/*.pt
+models/*.onnx
+models/*.pth
+
+# Logs
+*.log
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Streamlit
+.streamlit/
+
+# Old forensic-rag folder (keep for reference during transition)
+# forensic-rag/
