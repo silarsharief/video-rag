@@ -46,7 +46,7 @@ class ForensicDB:
         """Close database connections."""
         self.driver.close()
 
-    def add_scene_node(self, video_name, mode, scene_id, start_time, end_time, summary, person_ids, object_tags):
+    def add_scene_node(self, video_name, mode, scene_id, start_time, end_time, summary, person_ids, object_tags, ppe_detections=None):
         """
         Atomic transaction to update Graph (Timeline) and Vector (Search).
         
@@ -59,19 +59,40 @@ class ForensicDB:
             summary (str): AI-generated scene description
             person_ids (list): List of detected person IDs
             object_tags (list): List of detected object tags
+            ppe_detections (dict, optional): Detailed PPE detection results for factory mode
         """
+        # Prepare metadata with PPE detection results
+        metadata = {
+            "video_name": video_name, 
+            "mode": mode,
+            "start_time": start_time, 
+            "end_time": end_time, 
+            "scene_id": scene_id,
+            "person_count": len(person_ids),
+            "objects": ", ".join(object_tags) if object_tags else "none"
+        }
+        
+        # Add PPE detection results for factory mode
+        if ppe_detections and mode == "factory":
+            # Format PPE detections for storage
+            compliance = []
+            violations = []
+            for obj_name, det_data in ppe_detections.items():
+                count = det_data['count']
+                avg_conf = sum(det_data['confidences']) / len(det_data['confidences']) if det_data['confidences'] else 0
+                if obj_name.startswith('NO-'):
+                    violations.append(f"{obj_name}({count})")
+                elif obj_name in ['Hardhat', 'Mask', 'Safety Vest', 'Safety Cone']:
+                    compliance.append(f"{obj_name}({count})")
+            
+            metadata["ppe_compliance"] = ", ".join(compliance) if compliance else "none"
+            metadata["ppe_violations"] = ", ".join(violations) if violations else "none"
+            metadata["ppe_detection_count"] = sum(d['count'] for d in ppe_detections.values())
+        
         # A. Vector Store - for semantic search
         self.vector_col.add(
             documents=[summary],
-            metadatas=[{
-                "video_name": video_name, 
-                "mode": mode,
-                "start_time": start_time, 
-                "end_time": end_time, 
-                "scene_id": scene_id,
-                "person_count": len(person_ids),
-                "objects": ", ".join(object_tags) if object_tags else "none"
-            }],
+            metadatas=[metadata],
             ids=[scene_id]
         )
 
@@ -79,11 +100,11 @@ class ForensicDB:
         with self.driver.session() as session:
             session.execute_write(
                 self._create_graph_nodes, 
-                video_name, mode, scene_id, start_time, end_time, summary, person_ids, object_tags
+                video_name, mode, scene_id, start_time, end_time, summary, person_ids, object_tags, ppe_detections
             )
 
     @staticmethod
-    def _create_graph_nodes(tx, video_name, mode, scene_id, start, end, summary, person_ids, object_tags):
+    def _create_graph_nodes(tx, video_name, mode, scene_id, start, end, summary, person_ids, object_tags, ppe_detections=None):
         """
         Static method for Neo4j transaction.
         Creates video, scene, and person nodes with relationships.
@@ -91,18 +112,47 @@ class ForensicDB:
         # 1. Create Video Node
         tx.run("MERGE (v:Video {name: $name}) SET v.type = $mode", name=video_name, mode=mode)
         
-        # 2. Create Scene Node
-        query_scene = """
-        MATCH (v:Video {name: $video_name})
-        MERGE (s:Scene {id: $id})
-        SET s.start = $start, 
-            s.end = $end, 
-            s.summary = $summary,
-            s.objects = $objects,
-            s.mode = $mode
-        MERGE (v)-[:HAS_SEGMENT]->(s)
-        """
-        tx.run(query_scene, video_name=video_name, mode=mode, id=scene_id, start=start, end=end, summary=summary, objects=object_tags)
+        # 2. Create Scene Node with PPE detection results
+        if ppe_detections and mode == "factory":
+            # Format PPE detections for Neo4j
+            compliance = []
+            violations = []
+            for obj_name, det_data in ppe_detections.items():
+                count = det_data['count']
+                if obj_name.startswith('NO-'):
+                    violations.append(f"{obj_name}({count})")
+                elif obj_name in ['Hardhat', 'Mask', 'Safety Vest', 'Safety Cone']:
+                    compliance.append(f"{obj_name}({count})")
+            
+            ppe_compliance_str = ", ".join(compliance) if compliance else "none"
+            ppe_violations_str = ", ".join(violations) if violations else "none"
+            
+            query_scene = """
+            MATCH (v:Video {name: $video_name})
+            MERGE (s:Scene {id: $id})
+            SET s.start = $start, 
+                s.end = $end, 
+                s.summary = $summary,
+                s.objects = $objects,
+                s.mode = $mode,
+                s.ppe_compliance = $ppe_compliance,
+                s.ppe_violations = $ppe_violations
+            MERGE (v)-[:HAS_SEGMENT]->(s)
+            """
+            tx.run(query_scene, video_name=video_name, mode=mode, id=scene_id, start=start, end=end, 
+                   summary=summary, objects=object_tags, ppe_compliance=ppe_compliance_str, ppe_violations=ppe_violations_str)
+        else:
+            query_scene = """
+            MATCH (v:Video {name: $video_name})
+            MERGE (s:Scene {id: $id})
+            SET s.start = $start, 
+                s.end = $end, 
+                s.summary = $summary,
+                s.objects = $objects,
+                s.mode = $mode
+            MERGE (v)-[:HAS_SEGMENT]->(s)
+            """
+            tx.run(query_scene, video_name=video_name, mode=mode, id=scene_id, start=start, end=end, summary=summary, objects=object_tags)
 
         # 3. Create Timeline Link (The "Next" Arrow)
         query_timeline = """

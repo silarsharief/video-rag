@@ -7,6 +7,8 @@ certifi  # SSL certificates for Mac
 
 # ==================== Vision Processing (Edge) ====================
 # YOLO for object detection
+# Note: ultralytics automatically includes torch and torchvision
+# PyTorch 2.7+ compatibility workaround is handled in code (see src/core/ingest.py)
 ultralytics==8.3.0
 
 # InsightFace for face recognition

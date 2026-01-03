@@ -31,23 +31,50 @@ MODES = {
             Output pure JSON with summary.
         """,
         # EXPANDED: Vehicles + Pedestrians + Signs + Lights + Bags (for finding specific people)
-        "classes": [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 12, 13, 24, 26, 28]
+        "classes": [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 12, 13, 24, 26, 28],
+        "frame_skip_interval": 10  # Default: process every 10th frame
     },
     
     "factory": {
-        "model": YOLO_PPE_MODEL,  # yolo_ppe.pt - Custom PPE Model
+        "model": YOLO_PPE_MODEL,  # ppe.pt - Safety Detection Model
         "prompt": """
-            You are a Safety Inspector. 
-            The system has already detected specific PPE items.
-            1. Describe the worker's activity.
-            2. Verify violations: If 'no_helmet' or 'no_mask' is detected, confirm it.
-            3. Check for environmental hazards (spills, smoke, blocked paths).
+            You are a Safety Inspector analyzing a workplace scene.
+            The system has detected PPE items and violations in the video frames.
+            
+            CRITICAL: Report ALL detections - both compliance and violations.
+            
+            1. PPE COMPLIANCE (Good - report all detected):
+               - Hardhat: Workers wearing hardhats/helmets
+               - Mask: Workers wearing masks
+               - Safety Vest: Workers wearing safety vests
+               - Safety Cone: Safety cones present (environmental safety)
+            
+            2. PPE VIOLATIONS (Bad - report ALL detected):
+               - NO-Hardhat: Workers NOT wearing hardhats/helmets (SAFETY VIOLATION)
+               - NO-Mask: Workers NOT wearing masks (SAFETY VIOLATION)
+               - NO-Safety Vest: Workers NOT wearing safety vests (SAFETY VIOLATION)
+            
+            3. CONTEXT AND HAZARDS:
+               - Person: Number of people in scene
+               - machinery: Machinery present (potential hazard)
+               - vehicle: Vehicles present (potential hazard)
+               - Describe worker activities and environmental conditions
+            
+            4. SAFETY ASSESSMENT:
+               - List ALL violations found (be specific: "Worker without hardhat", "Worker without safety vest", etc.)
+               - List ALL compliance items found (be specific: "Worker with hardhat", "Worker with safety vest", etc.)
+               - Assess overall safety status and risk level
+               - Note any environmental hazards or unsafe conditions
+            
+            IMPORTANT: Do not skip any violations. If multiple workers are present, note violations for each.
             Output pure JSON with summary.
         """,
-        # EXPANDED: Enable ALL custom classes from your PPE model (0-9)
-        # 0:glove, 1:goggles, 2:helmet, 3:mask, 4:no_glove, 
-        # 5:no_goggles, 6:no_helmet, 7:no_mask, 8:no_shoes, 9:shoes
-        "classes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        # PPE model classes (ppe.pt has 10 classes: 0-9)
+        # 0:Hardhat, 1:Mask, 2:NO-Hardhat, 3:NO-Mask, 4:NO-Safety Vest,
+        # 5:Person, 6:Safety Cone, 7:Safety Vest, 8:machinery, 9:vehicle
+        "classes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # All 10 classes from ppe.pt
+        "frame_skip_interval": 10,  # Process every 10th frame (optimized for performance)
+        "confidence_threshold": 0.15  # Lower threshold for PPE model (detects low-confidence violations)
     },
     
     "kitchen": {
@@ -61,7 +88,8 @@ MODES = {
             Output pure JSON with summary.
         """,
         # EXPANDED: People + Bottles + Cups + Cutlery + Food + Pests + Appliances
-        "classes": [0, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 66, 68, 69, 70, 71, 72]
+        "classes": [0, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 66, 68, 69, 70, 71, 72],
+        "frame_skip_interval": 10  # Default: process every 10th frame
     },
     
     "general": {
@@ -74,7 +102,8 @@ MODES = {
             Output pure JSON with summary.
         """,
         # ENABLE EVERYTHING: 0 to 79 (All COCO classes)
-        "classes": list(range(80))
+        "classes": list(range(80)),
+        "frame_skip_interval": 10  # Default: process every 10th frame
     }
 }
 

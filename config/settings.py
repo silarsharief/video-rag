@@ -51,7 +51,7 @@ GEMINI_MODEL = "gemini-2.0-flash"
 # YOLO model files (relative to MODELS_DIR)
 YOLO_DEFAULT_MODEL = "yolo11n.pt"
 YOLO_HEAVY_MODEL = "yolo11x.pt"
-YOLO_PPE_MODEL = "yolo_ppe.pt"
+YOLO_PPE_MODEL = "ppe.pt"  # Updated to use ppe.pt model
 
 # ============================================================================
 # VIDEO PROCESSING PARAMETERS
