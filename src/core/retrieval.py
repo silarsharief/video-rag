@@ -14,6 +14,7 @@ from config.settings import (
     GEMINI_SEARCH_DELAY,
     DEFAULT_SEARCH_RESULTS
 )
+from config.prompts import get_search_prompt
 from src.core.database import ForensicDB
 
 
@@ -81,7 +82,34 @@ class ForensicSearch:
         try:
             # Rate limiting: Wait before calling Gemini
             time.sleep(GEMINI_SEARCH_DELAY)
-            prompt = f"User Query: {query}\nEvidence: {final_candidates}\nSummarize."
+            
+            # Determine mode from candidates (use most common mode, or first candidate's mode)
+            mode = mode_filter
+            if not mode and final_candidates:
+                # Get mode from first candidate if not specified
+                mode = final_candidates[0].get('mode', 'general')
+            
+            # Get appropriate search prompt for the mode
+            search_prompt_template = get_search_prompt(mode)
+            
+            # Format evidence for prompt (include video name, time, and description)
+            evidence_text = json.dumps([
+                {
+                    "video": c.get('video', 'Unknown'),
+                    "time": c.get('time', 'N/A'),
+                    "description": c.get('description', ''),
+                    "yolo_tags": c.get('yolo_tags', []),
+                    "persons": c.get('persons', [])
+                }
+                for c in final_candidates
+            ], indent=2)
+            
+            # Format the prompt with query and evidence
+            prompt = search_prompt_template.format(
+                query=query,
+                evidence=evidence_text
+            )
+            
             response = self.model.generate_content(prompt)
             return response.text, final_candidates
         except Exception as e:

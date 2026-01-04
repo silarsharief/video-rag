@@ -94,8 +94,66 @@ if query and CHROMADB_PATH.exists():
         mode_filter = None if selected_mode == "All" else selected_mode
         answer, evidence = search_engine.search(query, mode_filter=mode_filter)
     
-    # Display AI-generated summary
-    st.markdown(f"### 🤖 Analysis:\n{answer}")
+    # Display AI-generated summary with better formatting
+    st.markdown("### 🤖 Analysis")
+    
+    # Parse and format the analysis based on structure
+    lines = answer.split('\n')
+    current_section = None
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Detect scene/video headers
+        if line.startswith('SCENE') or line.startswith('VIDEO') or (line.startswith(('1.', '2.', '3.', '4.', '5.')) and ('SCENE' in line.upper() or 'VIDEO' in line.upper())):
+            if current_section:
+                st.markdown("---")
+            # Extract video name and time if present
+            st.markdown(f"#### {line}")
+            current_section = "scene"
+            
+        # Detect subsections
+        elif line.lower().startswith('violations:'):
+            violations_text = line.replace('Violations:', '').replace('violations:', '').strip()
+            if violations_text and violations_text.lower() != 'none':
+                st.error(f"🚨 **Violations:** {violations_text}")
+            else:
+                st.success("✅ **No violations detected**")
+                
+        elif line.lower().startswith('compliance:'):
+            compliance_text = line.replace('Compliance:', '').replace('compliance:', '').strip()
+            if compliance_text and compliance_text.lower() != 'none':
+                st.success(f"✅ **Compliance:** {compliance_text}")
+                
+        elif line.lower().startswith('context:'):
+            context_text = line.replace('Context:', '').replace('context:', '').strip()
+            st.info(f"ℹ️ **Context:** {context_text}")
+            
+        elif line.lower().startswith('key findings:'):
+            findings_text = line.replace('Key findings:', '').replace('key findings:', '').strip()
+            st.info(f"📋 **Key Findings:** {findings_text}")
+            
+        # General analysis section
+        elif 'GENERAL ANALYSIS' in line.upper():
+            st.markdown("---")
+            st.markdown(f"#### {line}")
+            current_section = "general"
+            
+        # Bullet points or list items
+        elif line.startswith('-') or line.startswith('•'):
+            st.markdown(f"  {line}")
+            
+        # Regular text
+        else:
+            # Check for risk indicators
+            if any(word in line.lower() for word in ['high risk', 'severe', 'critical', 'danger']):
+                st.warning(f"⚠️ {line}")
+            elif any(word in line.lower() for word in ['low risk', 'safe', 'compliant']):
+                st.success(f"✅ {line}")
+            else:
+                st.markdown(line)
     
     st.divider()
     
