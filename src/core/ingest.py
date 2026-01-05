@@ -32,6 +32,15 @@ from config.settings import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GEMINI_BUFFER_DELAY,
+    GEMINI_MAX_RETRIES,
+    GEMINI_RETRY_BASE_DELAY,
+    GEMINI_RETRY_MULTIPLIER,
+    GEMINI_RETRY_MAX_DELAY,
+    ENABLE_BATCH_QUEUE,
+    QUEUE_RETRY_DELAY,
+    MAX_FRAME_WIDTH,
+    MAX_FRAME_HEIGHT,
+    JPEG_QUALITY,
     MODELS_DIR,
     FRAME_SKIP_INTERVAL,
     MIN_DETECTION_CONFIDENCE,
@@ -91,7 +100,9 @@ class VideoIngestor:
         self.yolo = YOLO(str(model_path))
         logger.info(f"✅ YOLO Model Loaded Successfully: {model_name}")
         
-
+        # Initialize batch queue for failed API calls
+        self.failed_batch_queue = []  # Queue to store failed batches for retry
+        
         # Log model class names to verify correct model is loaded (especially for PPE model)
         if hasattr(self.yolo, 'names') and self.yolo.names:
             class_count = len(self.yolo.names)
@@ -291,8 +302,91 @@ class VideoIngestor:
         logger.info(f"   - Total Detections: {total_detections}")
         logger.info(f"   - Total Faces: {total_faces}")
         logger.info(f"   - Duration: {duration:.1f}s")
+        
+        # Process any queued batches that failed during main processing
+        if ENABLE_BATCH_QUEUE and self.failed_batch_queue:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"🔄 PROCESSING QUEUED BATCHES")
+            logger.info(f"{'='*60}")
+            logger.info(f"📦 {len(self.failed_batch_queue)} batch(es) in queue")
+            
+            for idx, batch_data in enumerate(self.failed_batch_queue, 1):
+                logger.info(f"\n🔄 Retrying queued batch {idx}/{len(self.failed_batch_queue)}")
+                logger.info(f"   Scene: {batch_data['start']:.1f}s - {batch_data['end']:.1f}s")
+                time.sleep(QUEUE_RETRY_DELAY)  # Longer delay for queued batches
+                self._flush_buffer(
+                    batch_data['frames'],
+                    batch_data['pids'],
+                    batch_data['tags'],
+                    batch_data['ppe_detections'],
+                    batch_data['start'],
+                    batch_data['end'],
+                    is_retry_from_queue=True
+                )
+            
+            logger.info(f"\n✅ Finished processing queued batches")
+            self.failed_batch_queue.clear()
 
-    def _flush_buffer(self, frames, pids, tags, ppe_detections, start, end):
+    def _compress_frames(self, frames):
+        """
+        Compress frames to reduce payload size and avoid API limits.
+        
+        Args:
+            frames (list): List of PIL Image objects
+            
+        Returns:
+            list: List of compressed PIL Image objects
+        """
+        compressed_frames = []
+        
+        for idx, frame in enumerate(frames):
+            try:
+                # Get original dimensions
+                original_width, original_height = frame.size
+                
+                # Calculate new dimensions maintaining aspect ratio
+                if original_width > MAX_FRAME_WIDTH or original_height > MAX_FRAME_HEIGHT:
+                    # Calculate scaling factor
+                    width_scale = MAX_FRAME_WIDTH / original_width
+                    height_scale = MAX_FRAME_HEIGHT / original_height
+                    scale = min(width_scale, height_scale)
+                    
+                    new_width = int(original_width * scale)
+                    new_height = int(original_height * scale)
+                    
+                    # Resize with high-quality resampling
+                    resized_frame = frame.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    logger.debug(f"   Frame {idx+1}: Resized from {original_width}x{original_height} to {new_width}x{new_height}")
+                else:
+                    resized_frame = frame
+                    logger.debug(f"   Frame {idx+1}: No resize needed ({original_width}x{original_height})")
+                
+                # Convert to RGB if needed (remove alpha channel)
+                if resized_frame.mode in ('RGBA', 'LA', 'P'):
+                    rgb_frame = Image.new('RGB', resized_frame.size, (255, 255, 255))
+                    if resized_frame.mode == 'P':
+                        resized_frame = resized_frame.convert('RGBA')
+                    rgb_frame.paste(resized_frame, mask=resized_frame.split()[-1] if resized_frame.mode in ('RGBA', 'LA') else None)
+                    resized_frame = rgb_frame
+                
+                # Apply JPEG compression by saving to bytes and reloading
+                import io
+                buffer = io.BytesIO()
+                resized_frame.save(buffer, format='JPEG', quality=JPEG_QUALITY, optimize=True)
+                buffer.seek(0)
+                compressed_frame = Image.open(buffer)
+                
+                compressed_frames.append(compressed_frame)
+                
+            except Exception as e:
+                logger.error(f"❌ Error compressing frame {idx+1}: {e}")
+                # Fallback: use original frame
+                compressed_frames.append(frame)
+        
+        logger.info(f"📦 Compressed {len(frames)} frames (max: {MAX_FRAME_WIDTH}x{MAX_FRAME_HEIGHT}, quality: {JPEG_QUALITY}%)")
+        return compressed_frames
+
+    def _flush_buffer(self, frames, pids, tags, ppe_detections, start, end, is_retry_from_queue=False):
         """
         Send buffered frames to Gemini for analysis and store results.
         
@@ -303,9 +397,14 @@ class VideoIngestor:
             ppe_detections (dict): Detailed PPE detection results {class_name: {'count': int, 'confidences': [float]}}
             start (float): Scene start time
             end (float): Scene end time
+            is_retry_from_queue (bool): Whether this is a retry from the failed batch queue
         """
         logger.info(f"🤖 Analyzing scene: {start:.1f}s - {end:.1f}s")
         logger.info(f"   - Frames: {len(frames)}, PIDs: {len(pids)}, Objects: {list(tags)}")
+        
+        # Step 1: Compress frames to reduce payload size
+        logger.info(f"🗜️  Compressing frames to reduce API payload...")
+        compressed_frames = self._compress_frames(frames)
         
         # Build detailed PPE detection summary for factory mode
         ppe_summary_text = ""
@@ -349,21 +448,25 @@ class VideoIngestor:
         )
         
         # Retry logic with exponential backoff
-        max_retries = 3
-        retry_delay = 0.5
-        
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(1, GEMINI_MAX_RETRIES + 1):
             try:
-                # Rate limiting (reduced since user upgraded limits)
+                # Calculate delay with exponential backoff
                 if attempt > 1:
-                    logger.info(f"♻️ Retry attempt {attempt}/{max_retries}...")
-                    time.sleep(retry_delay * attempt)
+                    # Exponential backoff: base_delay * (multiplier ^ (attempt - 1))
+                    delay = min(
+                        GEMINI_RETRY_BASE_DELAY * (GEMINI_RETRY_MULTIPLIER ** (attempt - 2)),
+                        GEMINI_RETRY_MAX_DELAY
+                    )
+                    logger.info(f"♻️ Retry attempt {attempt}/{GEMINI_MAX_RETRIES}...")
+                    logger.info(f"⏳ Waiting {delay:.1f}s before retry (exponential backoff)...")
+                    time.sleep(delay)
                 else:
+                    # First attempt: use standard buffer delay
                     time.sleep(GEMINI_BUFFER_DELAY)
                 
-                # Call Gemini API
-                logger.debug(f"📤 Sending {len(frames)} frames to Gemini...")
-                response = model.generate_content(frames + [prompt])
+                # Call Gemini API with compressed frames
+                logger.debug(f"📤 Sending {len(compressed_frames)} compressed frames to Gemini...")
+                response = model.generate_content(compressed_frames + [prompt])
                 
                 # Check if response is valid
                 if not response or not hasattr(response, 'text'):
@@ -409,41 +512,67 @@ class VideoIngestor:
                 break
                 
             except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON Parsing Error (attempt {attempt}/{max_retries}): {e}")
+                logger.error(f"❌ JSON Parsing Error (attempt {attempt}/{GEMINI_MAX_RETRIES}): {e}")
                 logger.error(f"   Problematic text: {cleaned_text[:200] if 'cleaned_text' in locals() else 'N/A'}")
                 
-                if attempt == max_retries:
-                    # Final attempt failed - store with fallback data
-                    logger.warning(f"⚠️ Using fallback data for scene {start:.1f}s - {end:.1f}s")
-                    sid = str(uuid.uuid4())
-                    self.db.add_scene_node(
-                        self.video_name, 
-                        self.mode, 
-                        sid, 
-                        start, 
-                        end, 
-                        f"[Parse Error] Scene from {start:.1f}s to {end:.1f}s with objects: {', '.join(tags)}", 
-                        list(pids), 
-                        list(tags),
-                        ppe_detections if self.mode == "factory" else None
-                    )
+                if attempt == GEMINI_MAX_RETRIES:
+                    # Final attempt failed - queue for retry or use fallback
+                    if ENABLE_BATCH_QUEUE and not is_retry_from_queue:
+                        # Add to queue for retry at the end
+                        logger.warning(f"📥 Adding scene {start:.1f}s - {end:.1f}s to retry queue (JSON parse error)")
+                        self.failed_batch_queue.append({
+                            'frames': frames,  # Use original frames (will be compressed on retry)
+                            'pids': pids,
+                            'tags': tags,
+                            'ppe_detections': ppe_detections,
+                            'start': start,
+                            'end': end
+                        })
+                    else:
+                        # Either queue is disabled or this is already a retry from queue - use fallback
+                        logger.warning(f"⚠️ Using fallback data for scene {start:.1f}s - {end:.1f}s")
+                        sid = str(uuid.uuid4())
+                        self.db.add_scene_node(
+                            self.video_name, 
+                            self.mode, 
+                            sid, 
+                            start, 
+                            end, 
+                            f"[Parse Error] Scene from {start:.1f}s to {end:.1f}s with objects: {', '.join(tags)}", 
+                            list(pids), 
+                            list(tags),
+                            ppe_detections if self.mode == "factory" else None
+                        )
                     
             except Exception as e:
-                logger.error(f"❌ Gemini API Error (attempt {attempt}/{max_retries}): {type(e).__name__}: {e}")
+                logger.error(f"❌ Gemini API Error (attempt {attempt}/{GEMINI_MAX_RETRIES}): {type(e).__name__}: {e}")
                 
-                if attempt == max_retries:
-                    # Final attempt failed - store with fallback data
-                    logger.warning(f"⚠️ Using fallback data for scene {start:.1f}s - {end:.1f}s")
-                    sid = str(uuid.uuid4())
-                    self.db.add_scene_node(
-                        self.video_name, 
-                        self.mode, 
-                        sid, 
-                        start, 
-                        end, 
-                        f"[API Error] Scene from {start:.1f}s to {end:.1f}s with objects: {', '.join(tags)}", 
-                        list(pids), 
-                        list(tags),
-                        ppe_detections if self.mode == "factory" else None
-                    )
+                if attempt == GEMINI_MAX_RETRIES:
+                    # Final attempt failed - queue for retry or use fallback
+                    if ENABLE_BATCH_QUEUE and not is_retry_from_queue:
+                        # Add to queue for retry at the end
+                        logger.warning(f"📥 Adding scene {start:.1f}s - {end:.1f}s to retry queue")
+                        self.failed_batch_queue.append({
+                            'frames': frames,  # Use original frames (will be compressed on retry)
+                            'pids': pids,
+                            'tags': tags,
+                            'ppe_detections': ppe_detections,
+                            'start': start,
+                            'end': end
+                        })
+                    else:
+                        # Either queue is disabled or this is already a retry from queue - use fallback
+                        logger.warning(f"⚠️ Using fallback data for scene {start:.1f}s - {end:.1f}s")
+                        sid = str(uuid.uuid4())
+                        self.db.add_scene_node(
+                            self.video_name, 
+                            self.mode, 
+                            sid, 
+                            start, 
+                            end, 
+                            f"[API Error] Scene from {start:.1f}s to {end:.1f}s with objects: {', '.join(tags)}", 
+                            list(pids), 
+                            list(tags),
+                            ppe_detections if self.mode == "factory" else None
+                        )
 

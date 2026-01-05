@@ -5,7 +5,11 @@ Queries vector database and generates AI summaries of search results.
 import os
 import json
 import time
+import logging
 import google.generativeai as genai
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Import centralized configurations
 from config.settings import (
@@ -14,7 +18,7 @@ from config.settings import (
     GEMINI_SEARCH_DELAY,
     DEFAULT_SEARCH_RESULTS
 )
-from config.prompts import get_search_prompt
+from config.prompts import get_search_prompt, get_query_rewrite_prompt
 from src.core.database import ForensicDB
 
 
@@ -30,6 +34,72 @@ class ForensicSearch:
         genai.configure(api_key=GEMINI_API_KEY)
         self.model = genai.GenerativeModel(GEMINI_MODEL)
 
+    def _rewrite_query(self, query, mode):
+        """
+        Rewrite and enhance user query for better retrieval accuracy.
+        
+        This method:
+        - Fixes spelling and grammar errors
+        - Adds context-rich terms relevant to the mode
+        - Expands abbreviations and makes query more specific
+        - Preserves original user intent
+        
+        Args:
+            query (str): Original user query
+            mode (str): Mode for context-specific enhancement (traffic, factory, etc.)
+            
+        Returns:
+            str: Enhanced query (or original if rewriting fails)
+        """
+        # Log original query
+        logger.info("="*60)
+        logger.info("QUERY REWRITING")
+        logger.info(f"Original Query: '{query}'")
+        logger.info(f"Mode: {mode}")
+        print(f"\n{'='*60}")
+        print(f"🔍 QUERY REWRITING")
+        print(f"{'='*60}")
+        print(f"📝 Original Query: '{query}'")
+        print(f"🏷️  Mode: {mode}")
+        
+        try:
+            # Rate limiting: Wait before calling Gemini
+            time.sleep(GEMINI_SEARCH_DELAY)
+            
+            # Get mode-specific rewrite prompt
+            rewrite_prompt_template = get_query_rewrite_prompt(mode)
+            
+            # Format prompt with original query
+            prompt = rewrite_prompt_template.format(query=query)
+            
+            # Generate enhanced query using AI
+            logger.info("Calling Gemini API for query enhancement...")
+            print(f"⏳ Calling Gemini API for query enhancement...")
+            response = self.model.generate_content(prompt)
+            enhanced_query = response.text.strip()
+            
+            # Basic validation: ensure we got a meaningful response
+            if enhanced_query and len(enhanced_query) > 0:
+                logger.info(f"Enhanced Query: '{enhanced_query}'")
+                logger.info("Query rewriting successful")
+                print(f"✅ Enhanced Query: '{enhanced_query}'")
+                print(f"{'='*60}\n")
+                return enhanced_query
+            else:
+                # Fallback to original query if response is empty
+                logger.warning("Empty response from AI. Using original query.")
+                print(f"⚠️  Empty response from AI. Using original query.")
+                print(f"{'='*60}\n")
+                return query
+                
+        except Exception as e:
+            # If rewriting fails, return original query
+            logger.error(f"Query rewriting failed: {e}. Using original query.")
+            print(f"❌ Query rewriting failed: {e}")
+            print(f"🔄 Using original query: '{query}'")
+            print(f"{'='*60}\n")
+            return query
+
     def search(self, query, mode_filter=None):
         """
         Search for relevant video scenes based on query.
@@ -41,15 +111,37 @@ class ForensicSearch:
         Returns:
             tuple: (AI summary string, list of evidence dictionaries)
         """
+        # Step 1: Rewrite query for better retrieval accuracy
+        # Determine mode for query enhancement (use filter or default to 'general')
+        rewrite_mode = mode_filter if mode_filter else 'general'
+        enhanced_query = self._rewrite_query(query, rewrite_mode)
+        
         # Build filter clause for mode-specific search
         where_clause = {"mode": mode_filter} if mode_filter else None
         
-        # Query vector database
+        # Step 2: Query vector database using enhanced query
+        logger.info("="*60)
+        logger.info("VECTOR DATABASE SEARCH")
+        logger.info(f"Using Enhanced Query: '{enhanced_query}'")
+        logger.info(f"Search Filter: {where_clause}")
+        logger.info(f"Max Results: {DEFAULT_SEARCH_RESULTS}")
+        print(f"\n{'='*60}")
+        print(f"🔎 VECTOR DATABASE SEARCH")
+        print(f"{'='*60}")
+        print(f"📊 Using Enhanced Query: '{enhanced_query}'")
+        print(f"🎯 Filter: {where_clause if where_clause else 'None (searching all modes)'}")
+        print(f"📈 Max Results: {DEFAULT_SEARCH_RESULTS}")
+        print(f"⏳ Querying vector database...")
+        
         results = self.db.vector_col.query(
-            query_texts=[query], 
+            query_texts=[enhanced_query], 
             n_results=DEFAULT_SEARCH_RESULTS, 
             where=where_clause
         )
+        
+        logger.info(f"Found {len(results['ids'][0]) if results['ids'] else 0} results")
+        print(f"✅ Found {len(results['ids'][0]) if results['ids'] else 0} results")
+        print(f"{'='*60}\n")
         
         if not results['ids']:
             return "No data found.", []

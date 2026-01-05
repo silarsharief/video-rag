@@ -60,7 +60,12 @@ YOLO_PPE_MODEL = "ppe.pt"  # Updated to use ppe.pt model
 FRAME_SKIP_INTERVAL = 10  # Process every Nth frame
 MIN_DETECTION_CONFIDENCE = 0.5  # Minimum confidence for YOLO detections
 SCENE_CAPTURE_INTERVAL = 0.5  # Minimum seconds between frame captures
-BATCH_SIZE = 10  # Number of frames to batch before sending to Gemini
+BATCH_SIZE = 5  # Number of frames to batch before sending to Gemini
+
+# Frame quality settings (to reduce payload size and avoid API limits)
+MAX_FRAME_WIDTH = 512  # Maximum width for frames sent to Gemini (lower = smaller payload)
+MAX_FRAME_HEIGHT = 512  # Maximum height for frames sent to Gemini
+JPEG_QUALITY = 60  # JPEG compression quality (1-100, lower = smaller file, 60 is good balance)
 
 # Face recognition
 FACE_DETECTION_SIZE = (640, 640)
@@ -69,10 +74,21 @@ FACE_CTX_ID = 0  # CPU context ID for insightface
 # ============================================================================
 # API RATE LIMITING
 # ============================================================================
-# Gemini API rate limits (adjust based on your tier)
-GEMINI_RPM_LIMIT = 60  # Requests per minute
-GEMINI_BUFFER_DELAY = 0.2  # Seconds to wait between Gemini calls during ingestion
-GEMINI_SEARCH_DELAY = 0.5  # Seconds to wait for search operations
+# Gemini API rate limits (based on your account tier)
+# gemini-2.0-flash: 2000 RPM (requests per minute)
+GEMINI_RPM_LIMIT = 60  # Your actual limit from API dashboard
+GEMINI_BUFFER_DELAY = 2.0  # Base delay between Gemini calls during ingestion (increased for stability)
+GEMINI_SEARCH_DELAY = 0.5  # Seconds for search operations (query rewrite + filtering + summary)
+
+# Retry configuration for API failures
+GEMINI_MAX_RETRIES = 5  # Maximum retry attempts when hitting rate limits
+GEMINI_RETRY_BASE_DELAY = 3.0  # Base delay for first retry (seconds)
+GEMINI_RETRY_MULTIPLIER = 2.0  # Exponential backoff multiplier (2.0 = double each time)
+GEMINI_RETRY_MAX_DELAY = 30.0  # Maximum delay between retries (seconds)
+
+# Queue configuration for failed batches
+ENABLE_BATCH_QUEUE = True  # Enable queueing of failed batches for retry at end
+QUEUE_RETRY_DELAY = 10.0  # Delay between queued batch retries (seconds)
 
 # ============================================================================
 # DATABASE CONFIGURATIONS

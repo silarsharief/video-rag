@@ -322,3 +322,123 @@ def get_search_prompt(mode_name):
     """
     return SEARCH_PROMPTS.get(mode_name, GENERAL_SEARCH_PROMPT)
 
+
+# ============================================================================
+# QUERY REWRITING PROMPTS
+# ============================================================================
+# These prompts improve user queries by fixing grammar, adding context,
+# and making them more specific to improve retrieval accuracy.
+
+TRAFFIC_QUERY_REWRITE = """
+You are a query enhancement system for traffic video search.
+
+Your task: Improve the user's query to make it more effective for retrieving relevant traffic scenes.
+
+RULES:
+1. Fix any spelling/grammar errors in the original query
+2. Add 2-3 relevant context terms to enhance searchability
+3. Expand abbreviations (e.g., "car accident" → "vehicle crash accident")
+4. Keep color and vehicle type keywords if mentioned
+5. Keep the original intent - DO NOT change what the user is asking for
+6. Keep it concise - add only the most relevant terms
+7. Return ONLY the rewritten query, no explanations
+
+Examples:
+- "show me car crash" → "show me vehicle car crash accident"
+- "red car running light" → "red vehicle car running red light violation"
+- "pedestrians crossing" → "pedestrians crossing road crosswalk"
+
+Original Query: {query}
+
+Rewritten Query:"""
+
+FACTORY_QUERY_REWRITE = """
+You are a query enhancement system for factory safety video search.
+
+Your task: Improve the user's query to make it more effective for retrieving relevant factory safety scenes.
+
+RULES:
+1. Fix any spelling/grammar errors in the original query
+2. Add 2-3 relevant context terms to enhance searchability
+3. Expand abbreviations (e.g., "ppe" → "PPE safety equipment")
+4. Keep the query concise - add only the most relevant terms
+5. Keep the original intent - DO NOT change what the user is asking for
+6. DO NOT list every possible item - use "etc" if needed
+7. Return ONLY the rewritten query, no explanations
+
+Examples:
+- "workers without helmets" → "workers without hardhat helmet PPE violation"
+- "ppe violations" → "PPE safety equipment violations worker"
+- "safe workers" → "safe workers wearing proper PPE compliance"
+- "safety violations" → "factory worker safety violations PPE"
+
+Original Query: {query}
+
+Rewritten Query:"""
+
+KITCHEN_QUERY_REWRITE = """
+You are a query enhancement system for kitchen safety video search.
+
+Your task: Improve the user's query to make it more effective for retrieving relevant kitchen safety scenes.
+
+RULES:
+1. Fix any spelling/grammar errors in the original query
+2. Add 2-3 relevant context terms to enhance searchability
+3. Expand key terms (e.g., "dirty" → "dirty unclean hygiene")
+4. Keep the query concise - add only the most relevant terms
+5. Keep the original intent - DO NOT change what the user is asking for
+6. DO NOT list every possible item
+7. Return ONLY the rewritten query, no explanations
+
+Examples:
+- "staff without gloves" → "kitchen staff workers without gloves hygiene"
+- "dirty kitchen" → "dirty unclean kitchen hygiene violation"
+- "unsafe knife" → "unsafe knife blade safety hazard"
+
+Original Query: {query}
+
+Rewritten Query:"""
+
+GENERAL_QUERY_REWRITE = """
+You are a query enhancement system for general video search.
+
+Your task: Improve the user's query to make it more effective for retrieving relevant video scenes.
+
+RULES:
+1. Fix any spelling/grammar errors in the original query
+2. Add 2-3 relevant descriptive terms to expand the search
+3. Expand abbreviations and make terms more specific
+4. Keep the original intent - DO NOT change what the user is asking for
+5. Keep it concise and natural
+6. Return ONLY the rewritten query, no explanations
+
+Examples:
+- "person walking" → "person walking moving"
+- "dark room" → "dark room low light"
+- "people talking" → "people talking conversation"
+
+Original Query: {query}
+
+Rewritten Query:"""
+
+# Query rewrite prompt mapping by mode
+QUERY_REWRITE_PROMPTS = {
+    "traffic": TRAFFIC_QUERY_REWRITE,
+    "factory": FACTORY_QUERY_REWRITE,
+    "kitchen": KITCHEN_QUERY_REWRITE,
+    "general": GENERAL_QUERY_REWRITE
+}
+
+
+def get_query_rewrite_prompt(mode_name):
+    """
+    Get query rewrite prompt for a specific mode.
+    
+    Args:
+        mode_name (str): Name of the mode (traffic, factory, kitchen, general)
+        
+    Returns:
+        str: Query rewrite prompt for the mode, or general rewrite prompt if mode not found
+    """
+    return QUERY_REWRITE_PROMPTS.get(mode_name, GENERAL_QUERY_REWRITE)
+
