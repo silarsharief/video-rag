@@ -16,10 +16,17 @@ from config.settings import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GEMINI_SEARCH_DELAY,
-    DEFAULT_SEARCH_RESULTS
+    SEARCH_TOP_K,
+    SEARCH_FETCH_LIMIT,
+    SIMILARITY_THRESHOLD,
+    MIN_RESULTS,
+    ENABLE_QUERY_CACHE,
+    ENABLE_METRICS
 )
 from config.prompts import get_search_prompt, get_query_rewrite_prompt
 from src.core.database import ForensicDB
+from src.core.cache import get_query_cache
+from src.core.metrics import get_metrics
 
 
 class ForensicSearch:
@@ -39,6 +46,7 @@ class ForensicSearch:
         Rewrite and enhance user query for better retrieval accuracy.
         
         This method:
+        - Checks cache first to avoid redundant API calls
         - Fixes spelling and grammar errors
         - Adds context-rich terms relevant to the mode
         - Expands abbreviations and makes query more specific
@@ -62,6 +70,21 @@ class ForensicSearch:
         print(f"📝 Original Query: '{query}'")
         print(f"🏷️  Mode: {mode}")
         
+        # Check cache first
+        if ENABLE_QUERY_CACHE:
+            query_cache = get_query_cache()
+            cached_result = query_cache.get_rewritten_query(query, mode)
+            if cached_result is not None:
+                if ENABLE_METRICS:
+                    get_metrics().record_cache_access(hit=True)
+                print(f"💾 Using cached query (cache hit)")
+                print(f"✅ Enhanced Query: '{cached_result}'")
+                print(f"{'='*60}\n")
+                return cached_result
+            else:
+                if ENABLE_METRICS:
+                    get_metrics().record_cache_access(hit=False)
+        
         try:
             # Rate limiting: Wait before calling Gemini
             time.sleep(GEMINI_SEARCH_DELAY)
@@ -84,6 +107,12 @@ class ForensicSearch:
                 logger.info("Query rewriting successful")
                 print(f"✅ Enhanced Query: '{enhanced_query}'")
                 print(f"{'='*60}\n")
+                
+                # Cache the successful rewrite
+                if ENABLE_QUERY_CACHE:
+                    query_cache = get_query_cache()
+                    query_cache.put_rewritten_query(query, mode, enhanced_query)
+                
                 return enhanced_query
             else:
                 # Fallback to original query if response is empty
@@ -124,32 +153,63 @@ class ForensicSearch:
         logger.info("VECTOR DATABASE SEARCH")
         logger.info(f"Using Enhanced Query: '{enhanced_query}'")
         logger.info(f"Search Filter: {where_clause}")
-        logger.info(f"Max Results: {DEFAULT_SEARCH_RESULTS}")
+        logger.info(f"Fetch Limit: {SEARCH_FETCH_LIMIT}, Top K: {SEARCH_TOP_K}, Threshold: {SIMILARITY_THRESHOLD}")
         print(f"\n{'='*60}")
         print(f"🔎 VECTOR DATABASE SEARCH")
         print(f"{'='*60}")
         print(f"📊 Using Enhanced Query: '{enhanced_query}'")
         print(f"🎯 Filter: {where_clause if where_clause else 'None (searching all modes)'}")
-        print(f"📈 Max Results: {DEFAULT_SEARCH_RESULTS}")
+        print(f"📈 Fetch Limit: {SEARCH_FETCH_LIMIT} | Top K: {SEARCH_TOP_K} | Threshold: {SIMILARITY_THRESHOLD}")
         print(f"⏳ Querying vector database...")
         
+        # Fetch more results, then filter by threshold
         results = self.db.vector_col.query(
             query_texts=[enhanced_query], 
-            n_results=DEFAULT_SEARCH_RESULTS, 
-            where=where_clause
+            n_results=SEARCH_FETCH_LIMIT, 
+            where=where_clause,
+            include=["documents", "metadatas", "distances"]  # Include distances for filtering
         )
         
-        logger.info(f"Found {len(results['ids'][0]) if results['ids'] else 0} results")
-        print(f"✅ Found {len(results['ids'][0]) if results['ids'] else 0} results")
-        print(f"{'='*60}\n")
+        raw_count = len(results['ids'][0]) if results['ids'] and results['ids'][0] else 0
+        logger.info(f"Raw results from vector DB: {raw_count}")
+        print(f"📥 Raw results from vector DB: {raw_count}")
         
-        if not results['ids']:
+        if not results['ids'] or not results['ids'][0]:
             return "No data found.", []
         
-        # Enrich results with graph data
+        # Step 3: Filter results by similarity threshold
+        # ChromaDB distance: lower = more similar (0.0 = perfect match)
+        filtered_indices = []
+        distances = results.get('distances', [[]])[0]
+        
+        for i, dist in enumerate(distances):
+            if dist <= SIMILARITY_THRESHOLD:
+                filtered_indices.append(i)
+        
+        # Ensure we return at least MIN_RESULTS (even if threshold not met)
+        if len(filtered_indices) < MIN_RESULTS and raw_count > 0:
+            sorted_indices = sorted(range(len(distances)), key=lambda x: distances[x])
+            filtered_indices = sorted_indices[:MIN_RESULTS]
+            logger.warning(f"Threshold not met. Returning best {MIN_RESULTS} results regardless.")
+            print(f"⚠️  Threshold not met. Returning best {MIN_RESULTS} results regardless.")
+        
+        # Limit to top K
+        filtered_indices = filtered_indices[:SEARCH_TOP_K]
+        
+        logger.info(f"After filtering: {len(filtered_indices)} results (threshold: {SIMILARITY_THRESHOLD})")
+        print(f"✅ After filtering: {len(filtered_indices)} results pass threshold")
+        
+        # Log distance scores for debugging
+        for idx in filtered_indices:
+            print(f"   📍 Result {idx}: distance={distances[idx]:.4f}")
+        
+        print(f"{'='*60}\n")
+        
+        # Enrich results with graph data (only for filtered indices)
         candidates = []
         with self.db.driver.session() as session:
-            for i, sid in enumerate(results['ids'][0]):
+            for idx in filtered_indices:
+                sid = results['ids'][0][idx]
                 # Get additional data from Neo4j graph
                 res = session.run("""
                     MATCH (s:Scene {id: $sid}) 
@@ -158,11 +218,14 @@ class ForensicSearch:
                 """, sid=sid).single()
                 
                 candidates.append({
-                    "id": i,
-                    "description": results['documents'][0][i], 
-                    "video": results['metadatas'][0][i]['video_name'],
-                    "time": f"{results['metadatas'][0][i]['start_time']:.1f}s",
-                    "mode": results['metadatas'][0][i].get('mode', 'unknown'),
+                    "id": idx,
+                    "description": results['documents'][0][idx], 
+                    "video": results['metadatas'][0][idx]['video_name'],
+                    "time": f"{results['metadatas'][0][idx]['start_time']:.1f}s - {results['metadatas'][0][idx]['end_time']:.1f}s",
+                    "start_time": results['metadatas'][0][idx]['start_time'],  # For video playback
+                    "end_time": results['metadatas'][0][idx]['end_time'],  # For video playback
+                    "mode": results['metadatas'][0][idx].get('mode', 'unknown'),
+                    "distance": distances[idx],  # Include distance score
                     "yolo_tags": res[0] if res and res[0] else [],
                     "persons": res[1] if res and res[1] else []
                 })

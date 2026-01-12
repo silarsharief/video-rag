@@ -20,6 +20,7 @@ import uuid
 import json
 import logging
 import re
+import hashlib
 import numpy as np
 from PIL import Image
 from ultralytics import YOLO
@@ -48,10 +49,15 @@ from config.settings import (
     BATCH_SIZE,
     FACE_DETECTION_SIZE,
     FACE_CTX_ID,
-    LOG_LEVEL
+    LOG_LEVEL,
+    ENABLE_ADAPTIVE_RATE_LIMITING,
+    ENABLE_METRICS,
+    ENABLE_ERROR_SUMMARY
 )
 from config.modes import get_mode_config
 from src.core.database import ForensicDB
+from src.core.adaptive_limiter import get_rate_limiter
+from src.core.metrics import get_metrics
 
 # Setup logging
 logging.basicConfig(level=LOG_LEVEL)
@@ -103,17 +109,33 @@ class VideoIngestor:
         # Initialize batch queue for failed API calls
         self.failed_batch_queue = []  # Queue to store failed batches for retry
         
-        # Log model class names to verify correct model is loaded (especially for PPE model)
+        # Initialize counters for duplicate detection tracking
+        self.scene_count = 0  # Track number of scenes processed
+        
+        # Initialize adaptive rate limiter if enabled
+        if ENABLE_ADAPTIVE_RATE_LIMITING:
+            self.rate_limiter = get_rate_limiter()
+            logger.info("⚡ Adaptive rate limiting enabled")
+        else:
+            self.rate_limiter = None
+        
+        # Initialize metrics tracker if enabled
+        if ENABLE_METRICS:
+            self.metrics = get_metrics()
+            logger.info("📊 Metrics tracking enabled")
+        else:
+            self.metrics = None
+        
+        # Track processing start time
+        self.processing_start_time = None
+
+        # Log model class names to verify correct model is loaded
         if hasattr(self.yolo, 'names') and self.yolo.names:
             class_count = len(self.yolo.names)
             logger.info(f"📋 Model has {class_count} classes")
-            # For PPE model, log all class names to verify
-            if "ppe" in model_name.lower() or mode == "factory":
-                logger.info(f"🦺 PPE Model Classes: {dict(self.yolo.names)}")
-            else:
-                # For other models, just log first few classes
-                sample_classes = {k: v for k, v in list(self.yolo.names.items())[:5]}
-                logger.info(f"📦 Sample Classes: {sample_classes}...")
+            # Log first few classes as sample
+            sample_classes = {k: v for k, v in list(self.yolo.names.items())[:5]}
+            logger.info(f"📦 Sample Classes: {sample_classes}...")
         
         # Initialize face recognition
         logger.info(f"👤 Initializing Face Recognition (InsightFace)...")
@@ -121,12 +143,65 @@ class VideoIngestor:
         self.face_app.prepare(ctx_id=FACE_CTX_ID, det_size=FACE_DETECTION_SIZE)
         logger.info(f"✅ Face Recognition Initialized")
 
-    def process_video(self):
+    def _is_video_processed(self):
+        """
+        Check if video has already been processed by querying ChromaDB for existing scenes.
+        
+        Returns:
+            bool: True if video has been processed, False otherwise
+        """
+        try:
+            # Query ChromaDB for any scenes from this video
+            results = self.db.vector_col.get(
+                where={"video_name": self.video_name, "mode": self.mode}
+            )
+            
+            if results and results.get('ids'):
+                scene_count = len(results['ids'])
+                logger.info(f"📋 Found {scene_count} existing scene(s) for video: {self.video_name} (mode: {self.mode})")
+                logger.info(f"   Video has already been processed")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Could not check video processing status: {e}")
+            logger.warning(f"   Continuing with processing...")
+            return False
+
+    def process_video(self, force_reprocess=False):
         """
         Main video processing pipeline.
         Extracts frames, detects objects, recognizes faces, and generates scene summaries.
+        
+        Args:
+            force_reprocess (bool): If True, reprocess even if video was already processed
+            
+        Returns:
+            dict: Processing result with status and metadata
         """
+        # Track processing start time
+        self.processing_start_time = time.time()
+        
         logger.info(f"▶️ Starting video processing...")
+        
+        # ============================================================================
+        # DUPLICATE DETECTION: Check if video was already processed (using ChromaDB)
+        # ============================================================================
+        if not force_reprocess:
+            logger.info(f"🔍 Checking if video was already processed...")
+            if self._is_video_processed():
+                logger.info(f"✅ Video already processed successfully!")
+                logger.info(f"📊 Skipping duplicate processing to save resources")
+                logger.info(f"💡 Use force_reprocess=True to reprocess this video")
+                
+                return {
+                    "status": "skipped",
+                    "reason": "already_processed",
+                    "video_name": self.video_name,
+                    "message": "Video was already processed successfully"
+                }
+        
         logger.info(f"🎯 Using Model: {self.config['model']} for mode: {self.mode}")
         logger.info(f"🎯 Target Classes: {self.config['classes']}")
         logger.info(f"🎯 Model Classes Available: {dict(self.yolo.names) if hasattr(self.yolo, 'names') else 'N/A'}")
@@ -157,7 +232,6 @@ class VideoIngestor:
         buffer_frames = []
         buffer_person_ids = set()
         buffer_object_tags = set()
-        buffer_ppe_detections = {}  # Track detailed PPE detections: {class_name: {'count': int, 'confidences': [float]}}
         last_capture_time = -10
         scene_start_time = 0
         target_classes = set(self.config['classes'])
@@ -195,66 +269,31 @@ class VideoIngestor:
                     frame_idx += 1
                     continue
                 
-                # Log raw detection count for first few frames (especially for PPE model debugging)
+                # Log raw detection count for debugging (first few frames)
                 raw_detection_count = len(detections)
-                if frame_idx < frame_skip_interval * 3 or self.mode == "factory":  # Log first 3 processed frames or all factory frames
-                    logger.info(f"🔍 Frame {frame_idx} ({current_time:.1f}s): Model returned {raw_detection_count} raw detections")
+                if frame_idx < frame_skip_interval * 3:  # Log first 3 processed frames
+                    logger.debug(f"🔍 Frame {frame_idx} ({current_time:.1f}s): Model returned {raw_detection_count} raw detections")
                 
                 found_interesting = False
                 frame_detections = []
-                all_detections = []  # Track all detections for debugging
-                
-                # Track detailed PPE detections for factory mode
-                frame_ppe_detections = {} if self.mode == "factory" else None
                 
                 for box in detections:
                     cls_id = int(box.cls[0])
                     confidence = float(box.conf[0])
                     obj_name = results[0].names.get(cls_id, f"unknown_{cls_id}")
                     
-                    # Log all detections for debugging (especially for PPE model)
-                    all_detections.append(f"{obj_name}({confidence:.2f})")
-                    
                     if cls_id in target_classes and confidence > conf_threshold:
                         found_interesting = True
                         frame_detections.append(f"{obj_name}({confidence:.2f})")
                         total_detections += 1
                         
-                        # Track detailed PPE detections for factory mode
-                        if self.mode == "factory":
-                            if obj_name not in frame_ppe_detections:
-                                frame_ppe_detections[obj_name] = {'count': 0, 'confidences': []}
-                            frame_ppe_detections[obj_name]['count'] += 1
-                            frame_ppe_detections[obj_name]['confidences'].append(confidence)
-                        
                         # Skip person class for object tags (handled separately by face detection)
                         if cls_id != 0: 
                             buffer_object_tags.add(obj_name)
                 
-                # Aggregate PPE detections into buffer
-                if self.mode == "factory" and frame_ppe_detections:
-                    for obj_name, det_data in frame_ppe_detections.items():
-                        if obj_name not in buffer_ppe_detections:
-                            buffer_ppe_detections[obj_name] = {'count': 0, 'confidences': []}
-                        buffer_ppe_detections[obj_name]['count'] += det_data['count']
-                        buffer_ppe_detections[obj_name]['confidences'].extend(det_data['confidences'])
-                
-                # Log all detections if any found (helpful for debugging PPE model)
-                if all_detections:
-                    # Use INFO level for factory mode to see what's happening
-                    log_level = logger.info if self.mode == "factory" else logger.debug
-                    log_level(f"🔍 Frame {frame_idx} ({current_time:.1f}s): All detections: {', '.join(all_detections)}")
-                    if frame_detections:
-                        log_level(f"✅ Frame {frame_idx} ({current_time:.1f}s): Matched detections: {', '.join(frame_detections)}")
-                    elif self.mode == "factory":
-                        # For factory mode, log when detections are found but filtered out
-                        logger.info(f"⚠️ Frame {frame_idx}: Detections found but filtered out:")
-                        logger.info(f"   - Target classes: {target_classes}")
-                        logger.info(f"   - Confidence threshold: {conf_threshold}")
-                        logger.info(f"   - All detections: {', '.join(all_detections)}")
-                elif raw_detection_count == 0 and (frame_idx < frame_skip_interval * 3 or self.mode == "factory"):
-                    # Log when no detections at all (first few frames or factory mode)
-                    logger.info(f"⚠️ Frame {frame_idx}: No detections found by model")
+                # Log detections if found
+                if frame_detections:
+                    logger.debug(f"🔍 Frame {frame_idx} ({current_time:.1f}s): Detected {', '.join(frame_detections)}")
                 
                 # Capture frame if interesting and enough time has passed
                 if found_interesting and (current_time - last_capture_time > SCENE_CAPTURE_INTERVAL):
@@ -275,12 +314,11 @@ class VideoIngestor:
 
             # Flush buffer when batch size reached
             if len(buffer_frames) >= BATCH_SIZE: 
-                self._flush_buffer(buffer_frames, buffer_person_ids, buffer_object_tags, buffer_ppe_detections, scene_start_time, current_time)
+                self._flush_buffer(buffer_frames, buffer_person_ids, buffer_object_tags, scene_start_time, current_time)
                 # Clear buffer
                 buffer_frames = []
                 buffer_person_ids = set()
                 buffer_object_tags = set()
-                buffer_ppe_detections = {}
                 scene_start_time = current_time
                 
             frame_idx += 1
@@ -288,10 +326,13 @@ class VideoIngestor:
         # Process remaining frames in buffer
         if buffer_frames:
             logger.info(f"📦 Flushing remaining {len(buffer_frames)} frames...")
-            self._flush_buffer(buffer_frames, buffer_person_ids, buffer_object_tags, buffer_ppe_detections, scene_start_time, frame_idx / fps)
+            self._flush_buffer(buffer_frames, buffer_person_ids, buffer_object_tags, scene_start_time, frame_idx / fps)
         
         cap.release()
         self.db.close()
+        
+        # Calculate processing time
+        processing_time = time.time() - self.processing_start_time
         
         # Log final statistics
         logger.info(f"✅ Finished processing: {self.video_name}")
@@ -302,6 +343,14 @@ class VideoIngestor:
         logger.info(f"   - Total Detections: {total_detections}")
         logger.info(f"   - Total Faces: {total_faces}")
         logger.info(f"   - Duration: {duration:.1f}s")
+        logger.info(f"   - Processing Time: {processing_time:.1f}s")
+        
+        # Record video processing metrics
+        if ENABLE_METRICS and self.metrics:
+            self.metrics.record_video_processing(processing_time)
+        
+        # Note: No need to explicitly mark video as processed - 
+        # the scenes stored in ChromaDB serve as the processing record
         
         # Process any queued batches that failed during main processing
         if ENABLE_BATCH_QUEUE and self.failed_batch_queue:
@@ -318,7 +367,6 @@ class VideoIngestor:
                     batch_data['frames'],
                     batch_data['pids'],
                     batch_data['tags'],
-                    batch_data['ppe_detections'],
                     batch_data['start'],
                     batch_data['end'],
                     is_retry_from_queue=True
@@ -326,6 +374,24 @@ class VideoIngestor:
             
             logger.info(f"\n✅ Finished processing queued batches")
             self.failed_batch_queue.clear()
+        
+        # Show final error summary and metrics if enabled
+        if ENABLE_ERROR_SUMMARY and ENABLE_METRICS and self.metrics:
+            print(self.metrics.get_summary_report())
+            logger.info(self.metrics.get_summary_report())
+        
+        # Return processing results
+        return {
+            "status": "completed",
+            "video_name": self.video_name,
+            "duration": duration,
+            "frame_count": frame_idx,
+            "scene_count": self.scene_count,
+            "detection_count": total_detections,
+            "face_count": total_faces,
+            "processing_time": processing_time,
+            "message": "Video processed successfully"
+        }
 
     def _compress_frames(self, frames):
         """
@@ -386,7 +452,7 @@ class VideoIngestor:
         logger.info(f"📦 Compressed {len(frames)} frames (max: {MAX_FRAME_WIDTH}x{MAX_FRAME_HEIGHT}, quality: {JPEG_QUALITY}%)")
         return compressed_frames
 
-    def _flush_buffer(self, frames, pids, tags, ppe_detections, start, end, is_retry_from_queue=False):
+    def _flush_buffer(self, frames, pids, tags, start, end, is_retry_from_queue=False):
         """
         Send buffered frames to Gemini for analysis and store results.
         
@@ -394,7 +460,6 @@ class VideoIngestor:
             frames (list): List of PIL Image objects
             pids (set): Set of detected person IDs
             tags (set): Set of detected object tags
-            ppe_detections (dict): Detailed PPE detection results {class_name: {'count': int, 'confidences': [float]}}
             start (float): Scene start time
             end (float): Scene end time
             is_retry_from_queue (bool): Whether this is a retry from the failed batch queue
@@ -406,48 +471,16 @@ class VideoIngestor:
         logger.info(f"🗜️  Compressing frames to reduce API payload...")
         compressed_frames = self._compress_frames(frames)
         
-        # Build detailed PPE detection summary for factory mode
-        ppe_summary_text = ""
-        if self.mode == "factory" and ppe_detections:
-            logger.info(f"🦺 PPE Detection Results:")
-            compliance_items = []
-            violation_items = []
-            
-            for obj_name, det_data in sorted(ppe_detections.items()):
-                count = det_data['count']
-                avg_conf = sum(det_data['confidences']) / len(det_data['confidences']) if det_data['confidences'] else 0
-                max_conf = max(det_data['confidences']) if det_data['confidences'] else 0
-                
-                # Categorize as compliance or violation
-                if obj_name.startswith('NO-'):
-                    violation_items.append(f"{obj_name}: {count} detection(s) (avg confidence: {avg_conf:.3f}, max: {max_conf:.3f})")
-                elif obj_name in ['Hardhat', 'Mask', 'Safety Vest', 'Safety Cone']:
-                    compliance_items.append(f"{obj_name}: {count} detection(s) (avg confidence: {avg_conf:.3f}, max: {max_conf:.3f})")
-                else:
-                    # Other objects (Person, machinery, vehicle)
-                    logger.info(f"   - {obj_name}: {count} detection(s) (avg: {avg_conf:.3f}, max: {max_conf:.3f})")
-            
-            if compliance_items:
-                logger.info(f"   ✅ PPE Compliance: {', '.join(compliance_items)}")
-                ppe_summary_text += "\n\nPPE COMPLIANCE DETECTED:\n" + "\n".join(f"  - {item}" for item in compliance_items)
-            
-            if violation_items:
-                logger.info(f"   ❌ PPE VIOLATIONS: {', '.join(violation_items)}")
-                ppe_summary_text += "\n\nPPE VIOLATIONS DETECTED:\n" + "\n".join(f"  - {item}" for item in violation_items)
-        
-        # Enhanced prompt with strict JSON formatting and explicit detection list
-        detected_objects_list = ", ".join(sorted(tags)) if tags else "None detected"
+        # Use prompt from config/prompts.py (mode-agnostic, works for all modes)
+        # VLM analyzes the full scene freely based on the mode's prompt
         prompt = (
             self.config["prompt"] + 
-            f"\n\nDETECTED OBJECTS IN THIS SCENE: {detected_objects_list}" +
-            ppe_summary_text +
             "\n\nIMPORTANT: Respond ONLY with valid JSON in this exact format:\n"
-            '{"summary": "detailed description including ALL violations and compliance items", "objects": ["object1", "object2"]}\n'
-            "Do not include any markdown formatting or additional text.\n"
-            "CRITICAL: List EVERY violation and compliance item detected in the summary. Use the PPE detection results above."
+            '{"summary": "brief description here", "objects": ["object1", "object2"]}\n'
+            "Do not include any markdown formatting or additional text."
         )
         
-        # Retry logic with exponential backoff
+        # Retry logic with exponential backoff and adaptive rate limiting
         for attempt in range(1, GEMINI_MAX_RETRIES + 1):
             try:
                 # Calculate delay with exponential backoff
@@ -461,8 +494,13 @@ class VideoIngestor:
                     logger.info(f"⏳ Waiting {delay:.1f}s before retry (exponential backoff)...")
                     time.sleep(delay)
                 else:
-                    # First attempt: use standard buffer delay
-                    time.sleep(GEMINI_BUFFER_DELAY)
+                    # First attempt: use adaptive rate limiter or standard delay
+                    if ENABLE_ADAPTIVE_RATE_LIMITING and self.rate_limiter:
+                        current_delay = self.rate_limiter.get_current_delay()
+                        logger.debug(f"⏳ Adaptive delay: {current_delay:.2f}s")
+                        time.sleep(current_delay)
+                    else:
+                        time.sleep(GEMINI_BUFFER_DELAY)
                 
                 # Call Gemini API with compressed frames
                 logger.debug(f"📤 Sending {len(compressed_frames)} compressed frames to Gemini...")
@@ -503,10 +541,21 @@ class VideoIngestor:
                     end, 
                     data.get('summary', 'No summary'), 
                     list(pids), 
-                    list(tags),
-                    ppe_detections if self.mode == "factory" else None
+                    list(tags)
                 )
                 logger.info(f"💾 Scene data stored successfully (ID: {sid[:8]}...)")
+                
+                # Increment scene counter for duplicate detection tracking
+                self.scene_count += 1
+                
+                # Record success in metrics and adaptive rate limiter
+                if ENABLE_METRICS and self.metrics:
+                    self.metrics.record_api_call(success=True, attempts=attempt)
+                
+                if ENABLE_ADAPTIVE_RATE_LIMITING and self.rate_limiter:
+                    self.rate_limiter.record_success()
+                    if ENABLE_METRICS and self.metrics:
+                        self.metrics.record_rate_limit_adjustment(self.rate_limiter.get_current_delay())
                 
                 # Success - break retry loop
                 break
@@ -516,6 +565,9 @@ class VideoIngestor:
                 logger.error(f"   Problematic text: {cleaned_text[:200] if 'cleaned_text' in locals() else 'N/A'}")
                 
                 if attempt == GEMINI_MAX_RETRIES:
+                    # Record final failure in metrics
+                    if ENABLE_METRICS and self.metrics:
+                        self.metrics.record_api_call(success=False, attempts=attempt, error_type="JSONDecodeError")
                     # Final attempt failed - queue for retry or use fallback
                     if ENABLE_BATCH_QUEUE and not is_retry_from_queue:
                         # Add to queue for retry at the end
@@ -524,7 +576,6 @@ class VideoIngestor:
                             'frames': frames,  # Use original frames (will be compressed on retry)
                             'pids': pids,
                             'tags': tags,
-                            'ppe_detections': ppe_detections,
                             'start': start,
                             'end': end
                         })
@@ -540,14 +591,26 @@ class VideoIngestor:
                             end, 
                             f"[Parse Error] Scene from {start:.1f}s to {end:.1f}s with objects: {', '.join(tags)}", 
                             list(pids), 
-                            list(tags),
-                            ppe_detections if self.mode == "factory" else None
+                            list(tags)
                         )
+                        self.scene_count += 1  # Track scene even if using fallback
                     
             except Exception as e:
-                logger.error(f"❌ Gemini API Error (attempt {attempt}/{GEMINI_MAX_RETRIES}): {type(e).__name__}: {e}")
+                error_type = type(e).__name__
+                is_rate_limit = "429" in str(e) or "ResourceExhausted" in str(e)
+                
+                logger.error(f"❌ Gemini API Error (attempt {attempt}/{GEMINI_MAX_RETRIES}): {error_type}: {e}")
+                
+                # Record failure in adaptive rate limiter
+                if ENABLE_ADAPTIVE_RATE_LIMITING and self.rate_limiter:
+                    self.rate_limiter.record_failure(is_rate_limit_error=is_rate_limit)
+                    if ENABLE_METRICS and self.metrics:
+                        self.metrics.record_rate_limit_adjustment(self.rate_limiter.get_current_delay())
                 
                 if attempt == GEMINI_MAX_RETRIES:
+                    # Record final failure in metrics
+                    if ENABLE_METRICS and self.metrics:
+                        self.metrics.record_api_call(success=False, attempts=attempt, error_type=error_type)
                     # Final attempt failed - queue for retry or use fallback
                     if ENABLE_BATCH_QUEUE and not is_retry_from_queue:
                         # Add to queue for retry at the end
@@ -556,7 +619,6 @@ class VideoIngestor:
                             'frames': frames,  # Use original frames (will be compressed on retry)
                             'pids': pids,
                             'tags': tags,
-                            'ppe_detections': ppe_detections,
                             'start': start,
                             'end': end
                         })
@@ -572,7 +634,7 @@ class VideoIngestor:
                             end, 
                             f"[API Error] Scene from {start:.1f}s to {end:.1f}s with objects: {', '.join(tags)}", 
                             list(pids), 
-                            list(tags),
-                            ppe_detections if self.mode == "factory" else None
+                            list(tags)
                         )
+                        self.scene_count += 1  # Track scene even if using fallback
 

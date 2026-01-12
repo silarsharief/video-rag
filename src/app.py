@@ -159,6 +159,11 @@ with st.sidebar:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
+            # Track processing statistics
+            processed_count = 0
+            skipped_count = 0
+            failed_count = 0
+            
             for i, uploaded_file in enumerate(uploaded_files):
                 # Save uploaded file
                 file_path = VIDEO_STORAGE_DIR / uploaded_file.name
@@ -172,13 +177,34 @@ with st.sidebar:
                 
                 try:
                     ingestor = VideoIngestor(str(file_path), mode=ingest_mode)
-                    ingestor.process_video()
+                    result = ingestor.process_video()
+                    
+                    # Handle different processing results
+                    if result and result.get('status') == 'skipped':
+                        skipped_count += 1
+                        st.info(f"ℹ️ **{uploaded_file.name}**: Already processed (skipped)")
+                        st.caption(f"Originally processed on {result.get('previous_processing', {}).get('processed_at', 'unknown date')}")
+                    elif result and result.get('status') == 'completed':
+                        processed_count += 1
+                        st.success(f"✅ **{uploaded_file.name}**: Processed successfully")
+                        st.caption(f"{result.get('scene_count', 0)} scenes, {result.get('detection_count', 0)} detections")
+                    else:
+                        processed_count += 1  # Count as processed even if no result returned (backward compatibility)
+                        
                 except Exception as e:
-                    st.error(f"Failed to process {uploaded_file.name}: {e}")
+                    failed_count += 1
+                    st.error(f"❌ **{uploaded_file.name}**: Failed to process")
+                    st.caption(f"Error: {str(e)}")
                 
                 progress_bar.progress((i + 1) / len(uploaded_files))
             
-            status_text.success("All videos processed successfully!")
+            # Show final summary
+            status_text.empty()
+            st.success(f"✅ **Processing Complete!**")
+            st.write(f"- ✅ **Processed:** {processed_count}")
+            st.write(f"- ⏭️ **Skipped (duplicates):** {skipped_count}")
+            if failed_count > 0:
+                st.write(f"- ❌ **Failed:** {failed_count}")
 
 # ============================================================================
 # MAIN: Forensic Search Interface
