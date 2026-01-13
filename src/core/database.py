@@ -15,6 +15,7 @@ from config.settings import (
     NEO4J_USERNAME,
     NEO4J_PASSWORD
 )
+from config.detection_classes import PPE_COMPLIANCE_CLASSES
 
 
 class ForensicDB:
@@ -82,7 +83,7 @@ class ForensicDB:
                 avg_conf = sum(det_data['confidences']) / len(det_data['confidences']) if det_data['confidences'] else 0
                 if obj_name.startswith('NO-'):
                     violations.append(f"{obj_name}({count})")
-                elif obj_name in ['Hardhat', 'Mask', 'Safety Vest', 'Safety Cone']:
+                elif obj_name in PPE_COMPLIANCE_CLASSES:
                     compliance.append(f"{obj_name}({count})")
             
             metadata["ppe_compliance"] = ", ".join(compliance) if compliance else "none"
@@ -121,7 +122,7 @@ class ForensicDB:
                 count = det_data['count']
                 if obj_name.startswith('NO-'):
                     violations.append(f"{obj_name}({count})")
-                elif obj_name in ['Hardhat', 'Mask', 'Safety Vest', 'Safety Cone']:
+                elif obj_name in PPE_COMPLIANCE_CLASSES:
                     compliance.append(f"{obj_name}({count})")
             
             ppe_compliance_str = ", ".join(compliance) if compliance else "none"

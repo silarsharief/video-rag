@@ -102,6 +102,10 @@ TRAFFIC_CLASSES = [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 12, 13, 24, 26, 28]
 # 5:Person, 6:Safety Cone, 7:Safety Vest, 8:machinery, 9:vehicle
 FACTORY_CLASSES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
+# PPE Compliance Class Names (used in database.py for factory mode)
+# Items that indicate safety compliance
+PPE_COMPLIANCE_CLASSES = ['Hardhat', 'Mask', 'Safety Vest', 'Safety Cone']
+
 # Kitchen Mode Classes
 # People + Bottles + Cups + Cutlery + Food + Pests + Appliances
 KITCHEN_CLASSES = [0, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 66, 68, 69, 70, 71, 72]
