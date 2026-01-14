@@ -142,6 +142,82 @@ LOG_LEVEL = "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # ============================================================================
+# FASTAPI SERVER CONFIGURATION
+# ============================================================================
+# Server settings
+API_HOST = os.getenv("API_HOST", "0.0.0.0")  # 0.0.0.0 allows external access
+API_PORT = int(os.getenv("API_PORT", "8000"))  # Default FastAPI port
+API_WORKERS = int(os.getenv("API_WORKERS", "2"))  # Number of worker processes
+API_DEBUG = os.getenv("API_DEBUG", "false").lower() == "true"  # Debug mode
+
+# API versioning
+API_VERSION = "v1"
+API_PREFIX = f"/api/{API_VERSION}"  # All endpoints will be /api/v1/*
+
+# ============================================================================
+# API AUTHENTICATION
+# ============================================================================
+# API Key authentication (simple but effective)
+# In production, store these securely (secrets manager, encrypted env vars)
+API_KEY_HEADER = "X-API-Key"  # Header name clients must use
+API_KEYS = [key.strip() for key in os.getenv("API_KEYS", "").split(",") if key.strip()]
+
+# If no API keys configured, generate a default one for development
+if not API_KEYS and ENVIRONMENT == "dev":
+    import secrets
+    _default_key = secrets.token_urlsafe(32)
+    API_KEYS = [_default_key]
+    print(f"⚠️  DEV MODE: Generated temporary API key: {_default_key}")
+
+# ============================================================================
+# CORS CONFIGURATION (Cross-Origin Resource Sharing)
+# ============================================================================
+# Which websites/domains can call our API
+# "*" means anyone (okay for dev, restrict in production)
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",")]
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+CORS_ALLOW_HEADERS = ["*"]
+
+# ============================================================================
+# API RATE LIMITING
+# ============================================================================
+# Prevent API abuse (requests per minute per API key)
+API_RATE_LIMIT_ENABLED = os.getenv("API_RATE_LIMIT_ENABLED", "true").lower() == "true"
+API_RATE_LIMIT_REQUESTS = int(os.getenv("API_RATE_LIMIT_REQUESTS", "60"))  # requests
+API_RATE_LIMIT_WINDOW = int(os.getenv("API_RATE_LIMIT_WINDOW", "60"))  # seconds
+
+# ============================================================================
+# API LOGGING
+# ============================================================================
+# Structured logging for API requests
+API_LOG_REQUESTS = True  # Log all incoming requests
+API_LOG_RESPONSES = True  # Log all outgoing responses
+API_LOG_HEADERS = False  # Log request headers (be careful with sensitive data)
+
+# ============================================================================
+# SERVER PROTECTION & TIMEOUTS
+# ============================================================================
+# Request timeout (seconds) - terminate requests that take too long
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))  # 60 seconds default
+
+# Search-specific timeout (seconds) - search operations can be slow
+SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "30"))  # 30 seconds for search
+
+# Video upload timeout (seconds) - large files need more time
+UPLOAD_TIMEOUT = int(os.getenv("UPLOAD_TIMEOUT", "300"))  # 5 minutes for upload
+
+# Maximum concurrent video processing tasks
+MAX_CONCURRENT_PROCESSING = int(os.getenv("MAX_CONCURRENT_PROCESSING", "3"))
+
+# Maximum request body size (bytes) - prevent huge uploads
+MAX_REQUEST_SIZE = int(os.getenv("MAX_REQUEST_SIZE", str(500 * 1024 * 1024)))  # 500MB
+
+# Circuit breaker settings (stop calling failing services)
+CIRCUIT_BREAKER_THRESHOLD = 5  # Number of failures before opening circuit
+CIRCUIT_BREAKER_TIMEOUT = 60  # Seconds to wait before retrying
+
+# ============================================================================
 # SSL CONFIGURATION (Mac fix)
 # ============================================================================
 import certifi

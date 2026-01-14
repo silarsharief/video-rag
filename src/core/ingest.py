@@ -152,14 +152,20 @@ class VideoIngestor:
         """
         try:
             # Query ChromaDB for any scenes from this video
+            # ChromaDB requires $and operator for multiple conditions
             results = self.db.vector_col.get(
-                where={"video_name": self.video_name, "mode": self.mode}
+                where={
+                    "$and": [
+                        {"video_name": self.video_name},
+                        {"mode": self.mode}
+                    ]
+                }
             )
             
             if results and results.get('ids'):
                 scene_count = len(results['ids'])
                 logger.info(f"📋 Found {scene_count} existing scene(s) for video: {self.video_name} (mode: {self.mode})")
-                logger.info(f"   Video has already been processed")
+                logger.info(f"   Video has already been processed - SKIPPING")
                 return True
             
             return False
